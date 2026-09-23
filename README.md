@@ -6,7 +6,8 @@ checking them against a commitment, instead of downloading the block.
 
 Phase 1 is implemented: the `DANetwork` trait, a local adapter with Merkle
 proofs, random sampling, a statistical confidence score, a CLI, and an HTTP API.
-The Celestia adapter is a typed stub for phase 2.
+The Celestia adapter can fetch an extended header from a node. Share sampling
+against that header is the next step.
 
 ## Run
 
@@ -31,11 +32,13 @@ Add `--json` on the client commands for the raw response. Useful start flags:
 
 ```bash
 cargo run -p da-light-cli -- start --samples 16 --shares 256 --withhold 40
-cargo run -p da-light-cli -- start --network celestia
+cargo run -p da-light-cli -- start --network celestia --celestia-rpc http://127.0.0.1:26658
 ```
 
-`--network celestia` is wired through the same trait and returns a clear
-not-implemented error until phase 2.
+`--network celestia` loads the latest extended header from a celestia-node
+JSON-RPC endpoint. Pass `--celestia-token` when that node requires a bearer
+token. Share requests are not implemented yet, so `start` stops once sampling
+begins.
 
 ## HTTP API
 
@@ -70,14 +73,16 @@ sampling. The engine lives in `crates/da-light-core/src/sampling/confidence.rs`.
 crates/da-light-core          trait, planner, workers, Merkle verifier, confidence
 crates/da-light-node          state, peer scores, axum API
 crates/da-adapter-mock        in-memory DA layer with real proofs
-crates/da-adapter-celestia    phase 2 stub
+crates/da-adapter-celestia    Celestia header fetch; share sampling is next
 apps/da-light-cli             sampling-node binary
 tests/integration             end-to-end sampling tests
 ```
 
-Commitments are 32-byte BLAKE3 Merkle roots. Leaves are tagged `0x00` and
-internal nodes `0x01`, so a leaf cannot be substituted for an internal node.
-Shares sit on a row-major square whose width is `ceil(sqrt(total_shares))`.
+The mock adapter commits shares with a 32-byte BLAKE3 Merkle root. Leaves are
+tagged `0x00` and internal nodes `0x01`. A Celestia header's commitment is the
+CometBFT Merkle root of the data availability header's row roots followed by
+its column roots, and it must match the block `data_hash`. Shares sit on a
+row-major square whose width is `ceil(sqrt(total_shares))`.
 
 ## Tests
 
@@ -93,7 +98,8 @@ not pick it up. A new terminal already has `cargo` from rustup.
 
 ## Next
 
-Phase 2: a real Celestia adapter (namespaced Merkle proofs against a live
-header), persistent header state, and retries across more than one peer.
+Phase 2, still open: sample shares from that Celestia header and verify
+namespace Merkle proofs, then persist header state and retry across more than
+one peer.
 Phase 3: row/column-aware sampling for 2D Reed-Solomon layouts, metrics, and a
 small dashboard.

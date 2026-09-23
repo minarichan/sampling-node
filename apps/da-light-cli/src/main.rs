@@ -68,9 +68,12 @@ struct StartArgs {
     /// Which DA adapter to sample
     #[arg(long, value_enum, default_value_t = NetworkKind::Mock)]
     network: NetworkKind,
-    /// Celestia RPC URL, used when --network celestia
+    /// Celestia node JSON-RPC URL, used when --network celestia
     #[arg(long, default_value = "http://127.0.0.1:26658")]
     celestia_rpc: String,
+    /// Bearer token for the Celestia node RPC, when the node requires auth
+    #[arg(long)]
+    celestia_token: Option<String>,
 }
 
 impl std::fmt::Display for NetworkKind {
@@ -135,7 +138,13 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
             })?;
             Arc::new(mock)
         }
-        NetworkKind::Celestia => Arc::new(CelestiaNetwork::new(&args.celestia_rpc)),
+        NetworkKind::Celestia => {
+            let mut network = CelestiaNetwork::new(&args.celestia_rpc);
+            if let Some(token) = &args.celestia_token {
+                network = network.with_token(token);
+            }
+            Arc::new(network)
+        }
     };
 
     let node = Arc::new(Node::new(network, config)?);

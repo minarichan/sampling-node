@@ -18,6 +18,8 @@ rust-version = "1.81"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
+sha2 = "0.10"
 axum = "0.8"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
