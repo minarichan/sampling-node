@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/da-light-core",
+    "crates/da-light-node",
+    "crates/da-adapter-mock",
+    "crates/da-adapter-celestia",
+    "apps/da-light-cli",
+    "tests/integration",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.81"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+da-adapter-celestia = { path = "crates/da-adapter-celestia" }
+da-adapter-mock = { path = "crates/da-adapter-mock" }
+da-light-core = { path = "crates/da-light-core" }
+da-light-node = { path = "crates/da-light-node" }
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

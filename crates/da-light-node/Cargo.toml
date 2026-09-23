@@ -1,0 +1,21 @@
+[package]
+name = "da-light-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sampling node runtime, in-memory state, and HTTP API"
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+da-light-core.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+da-adapter-mock.workspace = true
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

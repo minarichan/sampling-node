@@ -1,0 +1,15 @@
+[package]
+name = "da-adapter-mock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "In-memory data availability network with real Merkle proofs"
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+da-light-core.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "da-light-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sampling engine, commitment verification, and the DA network trait"
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+blake3.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
