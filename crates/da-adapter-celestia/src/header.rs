@@ -9,7 +9,17 @@ use da_light_core::{Commitment, DaError, Header, HeaderId};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub(crate) struct ParsedHeader {
+    pub header: Header,
+    pub row_roots: Vec<Vec<u8>>,
+    pub column_roots: Vec<Vec<u8>>,
+}
+
 pub fn extended_header_to_header(value: &Value) -> Result<Header, DaError> {
+    Ok(parse_extended_header(value)?.header)
+}
+
+pub(crate) fn parse_extended_header(value: &Value) -> Result<ParsedHeader, DaError> {
     let height = json_u64(pointer(value, "/header/height")?)?;
     let block_hash = pointer(value, "/commit/block_id/hash")?
         .as_str()
@@ -27,8 +37,8 @@ pub fn extended_header_to_header(value: &Value) -> Result<Header, DaError> {
         ));
     }
 
-    let mut leaves = row_roots;
-    leaves.extend(column_roots);
+    let mut leaves = row_roots.clone();
+    leaves.extend(column_roots.iter().cloned());
     let data_root = hash_from_byte_slices(&leaves);
     if data_root != data_hash {
         return Err(DaError::Message(
@@ -47,17 +57,21 @@ pub fn extended_header_to_header(value: &Value) -> Result<Header, DaError> {
         return Err(DaError::Message("celestia block hash is empty".into()));
     }
 
-    Ok(Header {
-        id: HeaderId(id.to_ascii_uppercase()),
-        height,
-        commitment: Commitment(data_root.to_vec()),
-        total_shares,
+    Ok(ParsedHeader {
+        header: Header {
+            id: HeaderId(id.to_ascii_uppercase()),
+            height,
+            commitment: Commitment(data_root.to_vec()),
+            total_shares,
+        },
+        row_roots,
+        column_roots,
     })
 }
 
 /// CometBFT `merkle.HashFromByteSlices`: SHA-256 with `0x00` on leaves and
 /// `0x01` on internal nodes, split at the largest power of two below the length.
-fn hash_from_byte_slices(items: &[Vec<u8>]) -> [u8; 32] {
+pub(crate) fn hash_from_byte_slices(items: &[Vec<u8>]) -> [u8; 32] {
     match items.len() {
         0 => sha256(&[]),
         1 => leaf_hash(&items[0]),
@@ -70,7 +84,7 @@ fn hash_from_byte_slices(items: &[Vec<u8>]) -> [u8; 32] {
     }
 }
 
-fn split_point(length: usize) -> usize {
+pub(crate) fn split_point(length: usize) -> usize {
     let bitlen = usize::BITS - length.leading_zeros();
     let mut split = 1usize << (bitlen - 1);
     if split == length {
@@ -96,6 +110,77 @@ fn inner_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+/// Sibling hashes authenticating `items[index]` under [`hash_from_byte_slices`].
+///
+/// Hashes are ordered from the leaf toward the root. Each sibling's side is
+/// determined by `index`, so a proof for a different leaf does not verify.
+pub(crate) fn data_root_siblings(
+    items: &[Vec<u8>],
+    index: usize,
+) -> Result<Vec<[u8; 32]>, DaError> {
+    if items.is_empty() || index >= items.len() {
+        return Err(DaError::CoordinateOutOfRange);
+    }
+    let mut siblings = Vec::new();
+    collect_siblings(items, index, &mut siblings);
+    Ok(siblings)
+}
+
+pub(crate) fn data_root_from_leaf(
+    leaf: &[u8],
+    index: usize,
+    leaf_count: usize,
+    siblings: &[[u8; 32]],
+) -> Result<[u8; 32], DaError> {
+    let mut sides = Vec::new();
+    record_sides(leaf_count, index, &mut sides)?;
+    if sides.len() != siblings.len() {
+        return Err(DaError::InvalidProof);
+    }
+    let mut acc = leaf_hash(leaf);
+    for (sibling_on_left, sibling) in sides.into_iter().zip(siblings) {
+        acc = if sibling_on_left {
+            inner_hash(sibling, &acc)
+        } else {
+            inner_hash(&acc, sibling)
+        };
+    }
+    Ok(acc)
+}
+
+fn collect_siblings(items: &[Vec<u8>], index: usize, out: &mut Vec<[u8; 32]>) {
+    if items.len() <= 1 {
+        return;
+    }
+    let split = split_point(items.len());
+    if index < split {
+        collect_siblings(&items[..split], index, out);
+        out.push(hash_from_byte_slices(&items[split..]));
+    } else {
+        let left = hash_from_byte_slices(&items[..split]);
+        collect_siblings(&items[split..], index - split, out);
+        out.push(left);
+    }
+}
+
+fn record_sides(len: usize, index: usize, out: &mut Vec<bool>) -> Result<(), DaError> {
+    if len == 0 || index >= len {
+        return Err(DaError::InvalidProof);
+    }
+    if len <= 1 {
+        return Ok(());
+    }
+    let split = split_point(len);
+    if index < split {
+        record_sides(split, index, out)?;
+        out.push(false);
+    } else {
+        record_sides(len - split, index - split, out)?;
+        out.push(true);
+    }
+    Ok(())
 }
 
 fn pointer<'a>(value: &'a Value, path: &str) -> Result<&'a Value, DaError> {
@@ -182,6 +267,19 @@ mod tests {
             hex::encode_upper(&header.commitment.0),
             "3D96B7D238E7E0456F6AF8E7CDF0A67BD6CF9C2089ECB559C659DCAA1F880353"
         );
+    }
+
+    #[test]
+    fn data_root_proof_opens_every_axis_root() {
+        let value: Value = serde_json::from_str(MIN_HEADER).unwrap();
+        let parsed = parse_extended_header(&value).unwrap();
+        let mut leaves = parsed.row_roots.clone();
+        leaves.extend(parsed.column_roots.iter().cloned());
+        for (index, leaf) in leaves.iter().enumerate() {
+            let siblings = data_root_siblings(&leaves, index).unwrap();
+            let root = data_root_from_leaf(leaf, index, leaves.len(), &siblings).unwrap();
+            assert_eq!(root.as_slice(), parsed.header.commitment.0.as_slice());
+        }
     }
 
     #[test]

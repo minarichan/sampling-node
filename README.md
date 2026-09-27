@@ -35,10 +35,11 @@ cargo run -p da-light-cli -- start --samples 16 --shares 256 --withhold 40
 cargo run -p da-light-cli -- start --network celestia --celestia-rpc http://127.0.0.1:26658
 ```
 
-`--network celestia` loads the latest extended header from a celestia-node
-JSON-RPC endpoint. Pass `--celestia-token` when that node requires a bearer
-token. Share requests are not implemented yet, so `start` stops once sampling
-begins.
+`--network celestia` reads extended headers and samples shares from a
+celestia-node JSON-RPC endpoint (`share.GetSamples`). Pass `--celestia-token`
+when that node requires a bearer token. Each share is checked with its
+namespace Merkle proof against the matching row or column root, and that root
+is checked against the header data root. `start` needs a reachable node.
 
 ## HTTP API
 
@@ -73,7 +74,7 @@ sampling. The engine lives in `crates/da-light-core/src/sampling/confidence.rs`.
 crates/da-light-core          trait, planner, workers, Merkle verifier, confidence
 crates/da-light-node          state, peer scores, axum API
 crates/da-adapter-mock        in-memory DA layer with real proofs
-crates/da-adapter-celestia    Celestia header fetch; share sampling is next
+crates/da-adapter-celestia    Celestia headers and namespace-Merkle share proofs
 apps/da-light-cli             sampling-node binary
 tests/integration             end-to-end sampling tests
 ```
@@ -81,8 +82,9 @@ tests/integration             end-to-end sampling tests
 The mock adapter commits shares with a 32-byte BLAKE3 Merkle root. Leaves are
 tagged `0x00` and internal nodes `0x01`. A Celestia header's commitment is the
 CometBFT Merkle root of the data availability header's row roots followed by
-its column roots, and it must match the block `data_hash`. Shares sit on a
-row-major square whose width is `ceil(sqrt(total_shares))`.
+its column roots, and it must match the block `data_hash`. A sampled share
+proves inclusion in one of those roots with a namespace Merkle proof. Shares
+sit on a row-major square whose width is `ceil(sqrt(total_shares))`.
 
 ## Tests
 
@@ -98,8 +100,7 @@ not pick it up. A new terminal already has `cargo` from rustup.
 
 ## Next
 
-Phase 2, still open: sample shares from that Celestia header and verify
-namespace Merkle proofs, then persist header state and retry across more than
-one peer.
+Phase 2, still open: retry shares a peer does not return, persist sampling
+state, and sample from more than one peer.
 Phase 3: row/column-aware sampling for 2D Reed-Solomon layouts, metrics, and a
 small dashboard.

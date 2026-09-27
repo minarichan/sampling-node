@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use da_light_core::{DaError, Header, HeaderId};
+use da_light_core::{DaError, Header, HeaderId, SampleCoordinate};
 use serde_json::{json, Value};
 
 use crate::header::extended_header_to_header;
@@ -40,16 +40,27 @@ impl CelestiaRpc {
     }
 
     pub async fn header(&self, id: &HeaderId) -> Result<Header, DaError> {
+        extended_header_to_header(&self.extended_header(id).await?)
+    }
+
+    pub(crate) async fn extended_header(&self, id: &HeaderId) -> Result<Value, DaError> {
         match lookup(id)? {
-            Lookup::Height(height) => {
-                let result = self.call("header.GetByHeight", json!([height])).await?;
-                extended_header_to_header(&result)
-            }
-            Lookup::Hash(hash) => {
-                let result = self.call("header.GetByHash", json!([hash])).await?;
-                extended_header_to_header(&result)
-            }
+            Lookup::Height(height) => self.call("header.GetByHeight", json!([height])).await,
+            Lookup::Hash(hash) => self.call("header.GetByHash", json!([hash])).await,
         }
+    }
+
+    pub(crate) async fn samples(
+        &self,
+        height: u64,
+        coords: &[SampleCoordinate],
+    ) -> Result<Value, DaError> {
+        let indices: Vec<Value> = coords
+            .iter()
+            .map(|coord| json!({"row": coord.row, "col": coord.col}))
+            .collect();
+        self.call("share.GetSamples", json!([height, indices]))
+            .await
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, DaError> {

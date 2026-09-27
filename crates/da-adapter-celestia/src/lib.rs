@@ -5,17 +5,19 @@
 //! `latest_header` and `get_header` call a celestia-node JSON-RPC endpoint
 //! (`header.LocalHead`, `header.GetByHeight`, `header.GetByHash`) and check
 //! that the data availability header's row and column roots hash to the
-//! block's `data_hash`. Share sampling is the next step.
+//! block's `data_hash`. `request_sample` calls `share.GetSamples`. Verification
+//! checks the namespace Merkle proof against that row or column root, then
+//! checks the root against the header data commitment.
 
 mod header;
+mod nmt;
 mod rpc;
+mod sample;
 
 use async_trait::async_trait;
 use da_light_core::{DANetwork, DaError, Header, HeaderId, Sample, SampleCoordinate, SampleProof};
 
 use rpc::CelestiaRpc;
-
-const SAMPLING_NOT_IMPLEMENTED: &str = "celestia share sampling is not implemented yet";
 
 /// JSON-RPC client for one celestia-node.
 ///
@@ -63,20 +65,20 @@ impl DANetwork for CelestiaNetwork {
 
     async fn request_sample(
         &self,
-        _header_id: &HeaderId,
-        _coord: SampleCoordinate,
+        header_id: &HeaderId,
+        coord: SampleCoordinate,
     ) -> Result<(Sample, SampleProof), DaError> {
-        Err(DaError::Unsupported(SAMPLING_NOT_IMPLEMENTED))
+        sample::request_sample(&self.rpc, header_id, coord).await
     }
 
     fn verify_sample(
         &self,
-        _header: &Header,
-        _coord: SampleCoordinate,
-        _sample: &Sample,
-        _proof: &SampleProof,
+        header: &Header,
+        coord: SampleCoordinate,
+        sample: &Sample,
+        proof: &SampleProof,
     ) -> Result<(), DaError> {
-        Err(DaError::Unsupported(SAMPLING_NOT_IMPLEMENTED))
+        sample::verify_sample(header, coord, sample, proof)
     }
 }
 
@@ -170,12 +172,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn share_sampling_is_still_unimplemented() {
-        let network = CelestiaNetwork::new("http://127.0.0.1:9");
-        let err = network
-            .request_sample(&HeaderId("1".into()), SampleCoordinate { row: 0, col: 0 })
+    async fn requests_one_share_and_verifies_it_against_the_data_root() {
+        use crate::nmt::{build_axis, prove_share, NAMESPACE_SIZE, SHARE_SIZE};
+        use base64::Engine;
+
+        let mut q0 = vec![0x11u8; SHARE_SIZE];
+        q0[..NAMESPACE_SIZE].fill(0x01);
+        let parity_col = vec![0x22u8; SHARE_SIZE];
+        let parity_row = vec![0x33u8; SHARE_SIZE];
+        let parity_corner = vec![0x44u8; SHARE_SIZE];
+        let shares = vec![
+            vec![q0.clone(), parity_col],
+            vec![parity_row, parity_corner],
+        ];
+        let row_roots = (0..2)
+            .map(|row| build_axis(&shares[row], 1, row).unwrap().root)
+            .collect::<Vec<_>>();
+        let column_roots = (0..2)
+            .map(|col| {
+                let column = vec![shares[0][col].clone(), shares[1][col].clone()];
+                build_axis(&column, 1, col).unwrap().root
+            })
+            .collect::<Vec<_>>();
+        let row0 = build_axis(&shares[0], 1, 0).unwrap();
+        let nodes = prove_share(&row0.leaf_hashes, 0).unwrap();
+        let sample = sample::rpc_sample_value(&q0, "row", 0, &nodes);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let row_b64: Vec<_> = row_roots
+            .iter()
+            .map(|root| base64::engine::general_purpose::STANDARD.encode(root))
+            .collect();
+        let col_b64: Vec<_> = column_roots
+            .iter()
+            .map(|root| base64::engine::general_purpose::STANDARD.encode(root))
+            .collect();
+        let mut leaves = row_roots;
+        leaves.extend(column_roots);
+        let data_root = hex::encode_upper(crate::header::hash_from_byte_slices(&leaves));
+        let header = json!({
+            "header": {"height": "9", "data_hash": data_root},
+            "commit": {"block_id": {"hash": "ab".repeat(32)}},
+            "dah": {"row_roots": row_b64, "column_roots": col_b64}
+        });
+        let app = Router::new().route(
+            "/",
+            post(move |Json(body): Json<Value>| {
+                let header = header.clone();
+                let sample = sample.clone();
+                async move {
+                    let method = body["method"].as_str().unwrap_or("");
+                    let response = match method {
+                        "header.GetByHash" => {
+                            json!({"jsonrpc": "2.0", "id": 1, "result": header})
+                        }
+                        "share.GetSamples" => {
+                            let row = body["params"][1][0]["row"].as_u64();
+                            let col = body["params"][1][0]["col"].as_u64();
+                            if row == Some(0) && col == Some(0) {
+                                json!({"jsonrpc": "2.0", "id": 1, "result": [sample]})
+                            } else {
+                                json!({"jsonrpc": "2.0", "id": 1, "error": {"message": "share not found"}})
+                            }
+                        }
+                        _ => json!({"jsonrpc": "2.0", "id": 1, "error": {"message": "not found"}}),
+                    };
+                    (StatusCode::OK, Json(response))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let network = CelestiaNetwork::new(format!("http://{addr}"));
+        let header_id = HeaderId("ab".repeat(32));
+        let header = network.get_header(&header_id).await.unwrap();
+        assert_eq!(header.total_shares, 4);
+        let coord = SampleCoordinate { row: 0, col: 0 };
+        let (share, proof) = network.request_sample(&header_id, coord).await.unwrap();
+        assert_eq!(share.0, q0);
+        network
+            .verify_sample(&header, coord, &share, &proof)
+            .unwrap();
+
+        let missing = network
+            .request_sample(&header_id, SampleCoordinate { row: 1, col: 1 })
             .await
             .unwrap_err();
-        assert_eq!(err, DaError::Unsupported(SAMPLING_NOT_IMPLEMENTED));
+        assert_eq!(missing, DaError::SampleUnavailable { row: 1, col: 1 });
+        let outside = network
+            .request_sample(&header_id, SampleCoordinate { row: 4, col: 0 })
+            .await
+            .unwrap_err();
+        assert_eq!(outside, DaError::CoordinateOutOfRange);
     }
 }

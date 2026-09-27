@@ -326,6 +326,7 @@ dependencies = [
  "da-light-core",
  "hex",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "tokio",
