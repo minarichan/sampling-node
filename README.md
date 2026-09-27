@@ -92,6 +92,9 @@ sit on a row-major square whose width is `ceil(sqrt(total_shares))`.
 cargo test --workspace
 ```
 
+The Celestia adapter test runs one full sampling round through the node against
+a fixture square, so that check does not need a live celestia-node.
+
 On Windows, the GNU toolchain also needs MinGW's `dlltool` and `as` on `PATH`
 (a portable copy is at `%USERPROFILE%\.local\w64devkit\bin` on this machine).
 Rust should keep its own bundled linker: if both `gcc` and

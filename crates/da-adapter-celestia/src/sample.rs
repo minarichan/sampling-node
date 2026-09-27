@@ -253,6 +253,93 @@ pub(crate) fn rpc_sample_value(share: &[u8], axis: &str, index: usize, nodes: &[
     })
 }
 
+/// Header and one row-proof sample for every cell of an extended square.
+///
+/// `width` is the extended square side. It must be even and at least 2.
+/// Original-quadrant namespaces increase in both row and column order so each
+/// axis tree is sorted.
+#[cfg(test)]
+pub(crate) struct ShareFixture {
+    pub header: Value,
+    pub samples: std::collections::HashMap<(u32, u32), Value>,
+    pub block_hash: String,
+}
+
+#[cfg(test)]
+pub(crate) fn share_fixture(width: usize) -> ShareFixture {
+    use crate::header::hash_from_byte_slices;
+    use crate::nmt::{build_axis, prove_share, NAMESPACE_SIZE, SHARE_SIZE};
+    use base64::Engine;
+
+    assert!(width >= 2 && width % 2 == 0, "extended width must be even");
+    let original = width / 2;
+    let mut shares = vec![vec![Vec::new(); width]; width];
+    for row in 0..width {
+        for col in 0..width {
+            let mut share = vec![(row * width + col) as u8; SHARE_SIZE];
+            if row < original && col < original {
+                let namespace = u8::try_from(row * original + col + 1).expect("namespace fits");
+                share[..NAMESPACE_SIZE].fill(namespace);
+            }
+            shares[row][col] = share;
+        }
+    }
+
+    let row_roots = (0..width)
+        .map(|row| {
+            build_axis(&shares[row], original, row)
+                .expect("row root")
+                .root
+        })
+        .collect::<Vec<_>>();
+    let column_roots = (0..width)
+        .map(|col| {
+            let column = (0..width)
+                .map(|row| shares[row][col].clone())
+                .collect::<Vec<_>>();
+            build_axis(&column, original, col)
+                .expect("column root")
+                .root
+        })
+        .collect::<Vec<_>>();
+
+    let mut samples = std::collections::HashMap::new();
+    for row in 0..width {
+        let built = build_axis(&shares[row], original, row).expect("row proof tree");
+        for col in 0..width {
+            let nodes = prove_share(&built.leaf_hashes, col).expect("row proof");
+            samples.insert(
+                (row as u32, col as u32),
+                rpc_sample_value(&shares[row][col], "row", col, &nodes),
+            );
+        }
+    }
+
+    let row_b64 = row_roots
+        .iter()
+        .map(|root| base64::engine::general_purpose::STANDARD.encode(root))
+        .collect::<Vec<_>>();
+    let col_b64 = column_roots
+        .iter()
+        .map(|root| base64::engine::general_purpose::STANDARD.encode(root))
+        .collect::<Vec<_>>();
+    let mut leaves = row_roots;
+    leaves.extend(column_roots);
+    let block_hash = "CD".repeat(32);
+    ShareFixture {
+        header: serde_json::json!({
+            "header": {
+                "height": "4",
+                "data_hash": hex::encode_upper(hash_from_byte_slices(&leaves)),
+            },
+            "commit": {"block_id": {"hash": block_hash}},
+            "dah": {"row_roots": row_b64, "column_roots": col_b64},
+        }),
+        samples,
+        block_hash,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -268,4 +268,77 @@ mod tests {
             .unwrap_err();
         assert_eq!(outside, DaError::CoordinateOutOfRange);
     }
+
+    #[tokio::test]
+    async fn the_node_samples_a_whole_fixture_square() {
+        use std::sync::Arc;
+
+        use da_light_node::{Node, NodeConfig};
+
+        let fixture = sample::share_fixture(4);
+        let samples = Arc::new(fixture.samples);
+        let header = Arc::new(fixture.header);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/",
+            post({
+                let samples = Arc::clone(&samples);
+                let header = Arc::clone(&header);
+                move |Json(body): Json<Value>| {
+                    let samples = Arc::clone(&samples);
+                    let header = Arc::clone(&header);
+                    async move {
+                        let method = body["method"].as_str().unwrap_or("");
+                        let response = match method {
+                            "header.LocalHead" | "header.GetByHeight" | "header.GetByHash" => {
+                                json!({"jsonrpc": "2.0", "id": 1, "result": header.as_ref()})
+                            }
+                            "share.GetSamples" => {
+                                let row = body["params"][1][0]["row"].as_u64().unwrap_or(u64::MAX);
+                                let col = body["params"][1][0]["col"].as_u64().unwrap_or(u64::MAX);
+                                match samples.get(&(row as u32, col as u32)) {
+                                    Some(sample) => {
+                                        json!({"jsonrpc": "2.0", "id": 1, "result": [sample]})
+                                    }
+                                    None => json!({"jsonrpc": "2.0", "id": 1, "error": {"message": "share not found"}}),
+                                }
+                            }
+                            _ => json!({"jsonrpc": "2.0", "id": 1, "error": {"message": "not found"}}),
+                        };
+                        (StatusCode::OK, Json(response))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let network = CelestiaNetwork::new(format!("http://{addr}"));
+        let node = Node::new(
+            Arc::new(network),
+            NodeConfig {
+                samples_per_header: 16,
+                upstream_id: "celestia".into(),
+                upstream_endpoint: format!("http://{addr}"),
+                ..NodeConfig::default()
+            },
+        )
+        .unwrap();
+
+        let report = node.sample_latest().await.unwrap();
+        let expected = 1.0 - 0.75_f64.powf(16.0);
+        assert_eq!(report.header_id, fixture.block_hash);
+        assert_eq!(report.height, 4);
+        assert_eq!(report.total_shares, 16);
+        assert_eq!(report.successful_samples, 16);
+        assert_eq!(report.failed_samples, 0);
+        assert!((report.confidence - expected).abs() < 1e-12);
+        assert_eq!(report.level, "Very High");
+
+        let status = node.status().await;
+        assert_eq!(status.peers[0].id, "celestia");
+        assert_eq!(status.peers[0].score, 16);
+    }
 }

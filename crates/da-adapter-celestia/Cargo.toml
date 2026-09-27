@@ -18,4 +18,5 @@ sha2.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+da-light-node.workspace = true
 tokio.workspace = true
