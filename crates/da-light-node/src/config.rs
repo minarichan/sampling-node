@@ -8,6 +8,8 @@ pub struct NodeConfig {
     pub listen_addr: SocketAddr,
     pub samples_per_header: u32,
     pub concurrency: usize,
+    /// Times to request a share the peer does not return. Invalid proofs are not retried.
+    pub sample_attempts: u32,
     /// Smallest missing-share fraction that makes a block unreconstructable.
     pub unavailable_fraction: f64,
     pub upstream_id: String,
@@ -20,6 +22,7 @@ impl Default for NodeConfig {
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 8080)),
             samples_per_header: 16,
             concurrency: 8,
+            sample_attempts: 3,
             unavailable_fraction: 0.25,
             upstream_id: "mock-local".into(),
             upstream_endpoint: "local".into(),
@@ -36,6 +39,11 @@ impl NodeConfig {
         }
         if self.concurrency == 0 {
             return Err(DaError::Message("concurrency must be at least 1".into()));
+        }
+        if self.sample_attempts == 0 {
+            return Err(DaError::Message(
+                "sample attempts must be at least 1".into(),
+            ));
         }
         if !(self.unavailable_fraction > 0.0 && self.unavailable_fraction <= 1.0) {
             return Err(DaError::Message(

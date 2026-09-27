@@ -60,6 +60,7 @@ impl Node {
             &header,
             coordinates,
             self.config.concurrency,
+            self.config.sample_attempts,
         )
         .await;
         self.apply_peer_scores(&results).await;
@@ -117,5 +118,91 @@ impl Node {
             };
             peers.adjust_score(&self.config.upstream_id, delta);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use da_light_core::{
+        Commitment, DANetwork, DaError, Header, HeaderId, Sample, SampleCoordinate, SampleProof,
+    };
+
+    use super::*;
+
+    struct Flaky {
+        calls: Mutex<u32>,
+    }
+
+    fn header() -> Header {
+        Header {
+            id: HeaderId("one-share".into()),
+            height: 1,
+            commitment: Commitment(vec![0; 32]),
+            total_shares: 1,
+        }
+    }
+
+    #[async_trait]
+    impl DANetwork for Flaky {
+        async fn latest_header(&self) -> Result<Header, DaError> {
+            Ok(header())
+        }
+
+        async fn get_header(&self, _id: &HeaderId) -> Result<Header, DaError> {
+            Ok(header())
+        }
+
+        async fn request_sample(
+            &self,
+            _header_id: &HeaderId,
+            coord: SampleCoordinate,
+        ) -> Result<(Sample, SampleProof), DaError> {
+            let mut calls = self.calls.lock().expect("call counter");
+            *calls += 1;
+            if *calls == 1 {
+                Err(DaError::SampleUnavailable {
+                    row: coord.row,
+                    col: coord.col,
+                })
+            } else {
+                Ok((Sample(b"share".to_vec()), SampleProof(Vec::new())))
+            }
+        }
+
+        fn verify_sample(
+            &self,
+            _header: &Header,
+            _coord: SampleCoordinate,
+            _sample: &Sample,
+            _proof: &SampleProof,
+        ) -> Result<(), DaError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_share_missing_on_the_first_try_counts_as_verified() {
+        let network = Arc::new(Flaky {
+            calls: Mutex::new(0),
+        });
+        let node = Node::new(
+            Arc::clone(&network) as Arc<dyn DANetwork>,
+            NodeConfig {
+                samples_per_header: 1,
+                sample_attempts: 2,
+                upstream_id: "celestia".into(),
+                ..NodeConfig::default()
+            },
+        )
+        .unwrap();
+
+        let report = node.sample_latest().await.unwrap();
+        assert_eq!(report.successful_samples, 1);
+        assert_eq!(report.failed_samples, 0);
+        assert_eq!(*network.calls.lock().expect("call counter"), 2);
+        assert_eq!(node.status().await.peers[0].score, 1);
     }
 }

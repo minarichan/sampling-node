@@ -39,7 +39,9 @@ cargo run -p da-light-cli -- start --network celestia --celestia-rpc http://127.
 celestia-node JSON-RPC endpoint (`share.GetSamples`). Pass `--celestia-token`
 when that node requires a bearer token. Each share is checked with its
 namespace Merkle proof against the matching row or column root, and that root
-is checked against the header data root. `start` needs a reachable node.
+is checked against the header data root. A share the peer does not return is
+requested up to three times (`--sample-attempts`). A share that fails its proof
+is not retried. `start` needs a reachable node.
 
 ## HTTP API
 
@@ -103,7 +105,7 @@ not pick it up. A new terminal already has `cargo` from rustup.
 
 ## Next
 
-Phase 2, still open: retry shares a peer does not return, persist sampling
-state, and sample from more than one peer.
+Phase 2, still open: persist sampling state, and sample from more than one
+peer.
 Phase 3: row/column-aware sampling for 2D Reed-Solomon layouts, metrics, and a
 small dashboard.

@@ -62,6 +62,9 @@ struct StartArgs {
     /// In-flight sample requests
     #[arg(long, default_value_t = 8)]
     concurrency: usize,
+    /// Times to request a share the peer does not return
+    #[arg(long, default_value_t = 3)]
+    sample_attempts: u32,
     /// Missing-share fraction that makes a block unreconstructable
     #[arg(long, default_value_t = 0.25)]
     unavailable_fraction: f64,
@@ -117,6 +120,7 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
         listen_addr: args.listen,
         samples_per_header: args.samples,
         concurrency: args.concurrency,
+        sample_attempts: args.sample_attempts,
         unavailable_fraction: args.unavailable_fraction,
         upstream_id: match args.network {
             NetworkKind::Mock => "mock-local".into(),

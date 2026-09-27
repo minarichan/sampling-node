@@ -388,6 +388,7 @@ dependencies = [
 name = "da-light-node"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "da-adapter-mock",
  "da-light-core",
