@@ -12,5 +12,5 @@ mod persist;
 mod state;
 
 pub use config::NodeConfig;
-pub use node::{Node, StatusSnapshot};
+pub use node::{Node, StatusSnapshot, Upstream};
 pub use peer_manager::Peer;

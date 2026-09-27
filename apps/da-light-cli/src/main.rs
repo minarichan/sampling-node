@@ -11,7 +11,7 @@ use da_adapter_celestia::CelestiaNetwork;
 use da_adapter_mock::{MockConfig, MockNetwork};
 use da_light_core::{ConfidenceReport, DANetwork};
 use da_light_node::api::router;
-use da_light_node::{Node, NodeConfig, StatusSnapshot};
+use da_light_node::{Node, NodeConfig, StatusSnapshot, Upstream};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
@@ -81,6 +81,9 @@ struct StartArgs {
     /// SQLite file that keeps sampling progress across restarts
     #[arg(long, default_value = "sampling-node.db")]
     data: PathBuf,
+    /// Extra upstream, as `id=endpoint`. Repeat to sample more than one peer.
+    #[arg(long = "peer", value_name = "ID=ENDPOINT")]
+    peers: Vec<String>,
 }
 
 impl std::fmt::Display for NetworkKind {
@@ -137,7 +140,7 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
         data_path: Some(args.data),
     };
 
-    let network: Arc<dyn DANetwork> = match args.network {
+    let primary: Arc<dyn DANetwork> = match args.network {
         NetworkKind::Mock => {
             let mock = MockNetwork::generate(MockConfig {
                 share_count: args.shares,
@@ -148,15 +151,33 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
             Arc::new(mock)
         }
         NetworkKind::Celestia => {
-            let mut network = CelestiaNetwork::new(&args.celestia_rpc);
-            if let Some(token) = &args.celestia_token {
-                network = network.with_token(token);
-            }
-            Arc::new(network)
+            Arc::new(celestia_network(&args.celestia_rpc, &args.celestia_token))
         }
     };
+    let mut upstreams = vec![Upstream {
+        id: config.upstream_id.clone(),
+        endpoint: config.upstream_endpoint.clone(),
+        network: Arc::clone(&primary),
+    }];
+    for spec in &args.peers {
+        let (id, endpoint) = spec
+            .split_once('=')
+            .with_context(|| format!("--peer must be id=endpoint, got {spec}"))?;
+        if id.is_empty() || endpoint.is_empty() {
+            anyhow::bail!("--peer must be id=endpoint, got {spec}");
+        }
+        let network = match args.network {
+            NetworkKind::Mock => Arc::clone(&primary),
+            NetworkKind::Celestia => Arc::new(celestia_network(endpoint, &args.celestia_token)),
+        };
+        upstreams.push(Upstream {
+            id: id.to_string(),
+            endpoint: endpoint.to_string(),
+            network,
+        });
+    }
 
-    let node = Arc::new(Node::new(network, config)?);
+    let node = Arc::new(Node::from_upstreams(upstreams, config)?);
     let report = node.sample_latest().await?;
     print_report(&report, false)?;
 
@@ -172,6 +193,14 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn celestia_network(endpoint: &str, token: &Option<String>) -> CelestiaNetwork {
+    let mut network = CelestiaNetwork::new(endpoint);
+    if let Some(token) = token {
+        network = network.with_token(token);
+    }
+    network
 }
 
 async fn shutdown_signal() {

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use da_light_core::{
-    run_sampling, ConfidenceEngine, ConfidenceReport, DANetwork, DaError, Header, HeaderId,
-    SampleOutcome, SamplePlanner, SampleResult,
+    run_sampling_across, ConfidenceEngine, ConfidenceReport, DANetwork, DaError, Header, HeaderId,
+    SampleOutcome, SamplePlanner, SampleResult, SamplingPeer,
 };
 
 use crate::config::NodeConfig;
@@ -24,9 +24,16 @@ pub struct StatusSnapshot {
     pub peers: Vec<Peer>,
 }
 
-/// Sampling node bound to one DA adapter.
+/// One upstream the node can sample.
+pub struct Upstream {
+    pub id: String,
+    pub endpoint: String,
+    pub network: Arc<dyn DANetwork>,
+}
+
+/// Sampling node bound to one or more upstream peers.
 pub struct Node {
-    network: Arc<dyn DANetwork>,
+    upstreams: Vec<Upstream>,
     store: Mutex<MemoryStore>,
     peers: Mutex<PeerManager>,
     db: Option<StateDb>,
@@ -37,13 +44,38 @@ pub struct Node {
 
 impl Node {
     pub fn new(network: Arc<dyn DANetwork>, config: NodeConfig) -> Result<Self, DaError> {
+        let upstream = Upstream {
+            id: config.upstream_id.clone(),
+            endpoint: config.upstream_endpoint.clone(),
+            network,
+        };
+        Self::from_upstreams(vec![upstream], config)
+    }
+
+    pub fn from_upstreams(upstreams: Vec<Upstream>, config: NodeConfig) -> Result<Self, DaError> {
         config.validate()?;
+        if upstreams.is_empty() {
+            return Err(DaError::Message("at least one peer is required".into()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for upstream in &upstreams {
+            if upstream.id.is_empty() || !seen.insert(upstream.id.clone()) {
+                return Err(DaError::Message(format!(
+                    "peer ids must be unique and non-empty (got {})",
+                    upstream.id
+                )));
+            }
+        }
+        let configured: Vec<(String, String)> = upstreams
+            .iter()
+            .map(|upstream| (upstream.id.clone(), upstream.endpoint.clone()))
+            .collect();
         let (db, store, peers) = if let Some(path) = &config.data_path {
-            let (db, store, peers) =
-                StateDb::open(path, &config.upstream_id, &config.upstream_endpoint)?;
+            let (db, store, peers) = StateDb::open(path, &configured)?;
             tracing::info!(
                 path = %path.display(),
                 headers = store.len(),
+                peers = configured.len(),
                 "loaded sampling state"
             );
             (Some(db), store, peers)
@@ -51,11 +83,20 @@ impl Node {
             (
                 None,
                 MemoryStore::default(),
-                PeerManager::single(&config.upstream_id, &config.upstream_endpoint),
+                PeerManager::from_peers(
+                    configured
+                        .into_iter()
+                        .map(|(id, endpoint)| Peer {
+                            id,
+                            endpoint,
+                            score: 0,
+                        })
+                        .collect(),
+                ),
             )
         };
         Ok(Self {
-            network,
+            upstreams,
             store: Mutex::new(store),
             peers: Mutex::new(peers),
             db,
@@ -66,22 +107,60 @@ impl Node {
     }
 
     pub async fn sample_latest(&self) -> Result<ConfidenceReport, DaError> {
-        let header = self.network.latest_header().await?;
+        let header = self.latest_header().await?;
         self.sample_header(header).await
+    }
+
+    async fn latest_header(&self) -> Result<Header, DaError> {
+        let order = self.peers.lock().await.ranked_ids();
+        let mut last = None;
+        for id in order {
+            let Some(network) = self.network_for(&id) else {
+                continue;
+            };
+            match network.latest_header().await {
+                Ok(header) => return Ok(header),
+                Err(err) => last = Some(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| DaError::Message("no peers configured".into())))
+    }
+
+    fn network_for(&self, id: &str) -> Option<Arc<dyn DANetwork>> {
+        self.upstreams
+            .iter()
+            .find(|upstream| upstream.id == id)
+            .map(|upstream| Arc::clone(&upstream.network))
     }
 
     pub async fn sample_header(&self, header: Header) -> Result<ConfidenceReport, DaError> {
         let exclude = self.store.lock().await.successful_coords(&header.id);
         let coordinates = self.planner.plan_samples_excluding(&header, &exclude);
-        let results = run_sampling(
-            Arc::clone(&self.network),
+        let (assignments, sampling_peers) = {
+            let peers = self.peers.lock().await;
+            let assignments = peers.assign(&coordinates);
+            let sampling_peers = peers
+                .ranked_ids()
+                .into_iter()
+                .filter_map(|id| {
+                    self.network_for(&id)
+                        .map(|network| SamplingPeer { id, network })
+                })
+                .collect::<Vec<_>>();
+            (assignments, sampling_peers)
+        };
+        let mut results = run_sampling_across(
             &header,
-            coordinates,
+            assignments,
+            &sampling_peers,
             self.config.concurrency,
             self.config.sample_attempts,
         )
         .await;
         self.apply_peer_scores(&results).await;
+        if sampling_peers.len() > 1 {
+            refuse_single_source(&mut results);
+        }
         let report = self
             .store
             .lock()
@@ -135,7 +214,7 @@ impl Node {
                 SampleOutcome::InvalidProof => -10,
                 SampleOutcome::Unavailable | SampleOutcome::Failed => -1,
             };
-            peers.adjust_score(&self.config.upstream_id, delta);
+            peers.adjust_score(&result.peer_id, delta);
         }
     }
 
@@ -146,6 +225,39 @@ impl Node {
         let store = self.store.lock().await;
         let peers = self.peers.lock().await;
         db.save(&store, &peers)
+    }
+}
+
+/// A multi-peer round is useful only when more than one peer contributed a
+/// verified share. Otherwise those successes are recorded as failures so the
+/// next round can try them again.
+fn refuse_single_source(results: &mut [SampleResult]) {
+    let mut source = None;
+    let mut verified = 0usize;
+    for result in results.iter() {
+        if result.outcome != SampleOutcome::Verified {
+            continue;
+        }
+        verified += 1;
+        match &source {
+            None => source = Some(result.peer_id.clone()),
+            Some(id) if id != &result.peer_id => return,
+            Some(_) => {}
+        }
+    }
+    if verified == 0 {
+        return;
+    }
+    tracing::warn!(
+        peer = source.as_deref().unwrap_or(""),
+        verified,
+        "refusing a sample set that all came from one peer"
+    );
+    for result in results.iter_mut() {
+        if result.outcome == SampleOutcome::Verified {
+            result.outcome = SampleOutcome::Failed;
+            result.detail = Some("all verified samples came from one peer".into());
+        }
     }
 }
 

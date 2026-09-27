@@ -41,9 +41,16 @@ when that node requires a bearer token. Each share is checked with its
 namespace Merkle proof against the matching row or column root, and that root
 is checked against the header data root. A share the peer does not return is
 requested up to three times (`--sample-attempts`). A share that fails its proof
-is not retried. `start` needs a reachable node. Sampling progress and the peer
-score are written to `sampling-node.db`. Pass `--data` to use another file. A
+is not retried. `start` needs a reachable node. Sampling progress and peer
+scores are written to `sampling-node.db`. Pass `--data` to use another file. A
 later `start` skips shares that already verified.
+
+Repeat `--peer id=endpoint` to sample more than one upstream. A peer with a
+higher score is asked more often. On the mock adapter every extra peer serves
+the same local square. On Celestia each endpoint is another node, and
+`--celestia-token` is sent to all of them. When more than one peer is
+configured, a round whose verified shares all came from one peer is not counted
+toward confidence, so the next round can try those shares again.
 
 ## HTTP API
 
@@ -68,9 +75,10 @@ confidence = 1 - (1 - f) ^ s
 light client does not download the block. Failed samples are counted and shown,
 and they do not increase `s`.
 
-This model treats samples as independent and does not yet adjust for peer
-correlation. Phase 3 can replace it with a hypergeometric model and adaptive
-sampling. The engine lives in `crates/da-light-core/src/sampling/confidence.rs`.
+The formula treats the counted samples as independent. A round that was served
+by only one of several configured peers is left out of `s`. Phase 3 can replace
+the formula with a hypergeometric model and adaptive sampling. The engine lives
+in `crates/da-light-core/src/sampling/confidence.rs`.
 
 ## Layout
 
@@ -107,6 +115,5 @@ not pick it up. A new terminal already has `cargo` from rustup.
 
 ## Next
 
-Phase 2, still open: sample from more than one peer.
 Phase 3: row/column-aware sampling for 2D Reed-Solomon layouts, metrics, and a
 small dashboard.

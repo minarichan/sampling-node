@@ -31,8 +31,16 @@ impl SampleOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampleResult {
     pub coordinate: SampleCoordinate,
+    pub peer_id: String,
     pub outcome: SampleOutcome,
     pub detail: Option<String>,
+}
+
+/// One upstream that can serve a sample.
+#[derive(Clone)]
+pub struct SamplingPeer {
+    pub id: String,
+    pub network: Arc<dyn DANetwork>,
 }
 
 /// Fetch and verify `coordinates` with at most `concurrency` requests in flight.
@@ -46,16 +54,45 @@ pub async fn run_sampling(
     concurrency: usize,
     attempts: u32,
 ) -> Vec<SampleResult> {
-    if coordinates.is_empty() {
+    let peers = vec![SamplingPeer {
+        id: String::new(),
+        network,
+    }];
+    let assignments = coordinates
+        .into_iter()
+        .map(|coordinate| (coordinate, String::new()))
+        .collect();
+    run_sampling_across(header, assignments, &peers, concurrency, attempts).await
+}
+
+/// Sample coordinates that have already been assigned to peers.
+///
+/// A share the assigned peer does not return is tried on the other peers, up to
+/// `attempts` requests in total. The result names the peer that produced it.
+pub async fn run_sampling_across(
+    header: &Header,
+    assignments: Vec<(SampleCoordinate, String)>,
+    peers: &[SamplingPeer],
+    concurrency: usize,
+    attempts: u32,
+) -> Vec<SampleResult> {
+    if assignments.is_empty() {
         return Vec::new();
     }
 
     let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut tasks = JoinSet::new();
-    let mut results = Vec::with_capacity(coordinates.len());
+    let mut results = Vec::with_capacity(assignments.len());
 
-    for coordinate in coordinates {
-        let network = Arc::clone(&network);
+    let peers = peers
+        .iter()
+        .map(|peer| SamplingPeer {
+            id: peer.id.clone(),
+            network: Arc::clone(&peer.network),
+        })
+        .collect::<Vec<_>>();
+    for (coordinate, peer_id) in assignments {
+        let peers = peers.clone();
         let header = header.clone();
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
@@ -63,7 +100,7 @@ pub async fn run_sampling(
                 .acquire_owned()
                 .await
                 .expect("sampling semaphore stays open");
-            fetch_one(network, header, coordinate, attempts).await
+            fetch_one(peers, header, coordinate, peer_id, attempts).await
         });
     }
 
@@ -79,15 +116,26 @@ pub async fn run_sampling(
 }
 
 async fn fetch_one(
-    network: Arc<dyn DANetwork>,
+    peers: Vec<SamplingPeer>,
     header: Header,
     coordinate: SampleCoordinate,
+    assigned: String,
     attempts: u32,
 ) -> SampleResult {
+    let order = attempt_order(&peers, &assigned);
+    if order.is_empty() {
+        return SampleResult {
+            coordinate,
+            peer_id: assigned,
+            outcome: SampleOutcome::Failed,
+            detail: Some("no peer is configured".into()),
+        };
+    }
     let attempts = attempts.max(1);
     let mut latest = None;
-    for _ in 0..attempts {
-        let result = request_once(Arc::clone(&network), header.clone(), coordinate).await;
+    for attempt in 0..attempts {
+        let peer = &order[attempt as usize % order.len()];
+        let result = request_once(&peer.network, header.clone(), coordinate, peer.id.clone()).await;
         if !matches!(
             result.outcome,
             SampleOutcome::Unavailable | SampleOutcome::Failed
@@ -99,25 +147,40 @@ async fn fetch_one(
     latest.expect("at least one sample attempt runs")
 }
 
+fn attempt_order<'a>(peers: &'a [SamplingPeer], assigned: &str) -> Vec<&'a SamplingPeer> {
+    let mut order = Vec::new();
+    if let Some(peer) = peers.iter().find(|peer| peer.id == assigned) {
+        order.push(peer);
+    }
+    for peer in peers {
+        if peer.id != assigned {
+            order.push(peer);
+        }
+    }
+    order
+}
+
 async fn request_once(
-    network: Arc<dyn DANetwork>,
+    network: &Arc<dyn DANetwork>,
     header: Header,
     coordinate: SampleCoordinate,
+    peer_id: String,
 ) -> SampleResult {
     match network.request_sample(&header.id, coordinate).await {
         Ok((sample, proof)) => match network.verify_sample(&header, coordinate, &sample, &proof) {
             Ok(()) => SampleResult {
                 coordinate,
+                peer_id,
                 outcome: SampleOutcome::Verified,
                 detail: None,
             },
-            Err(err) => failure(coordinate, &err),
+            Err(err) => failure(coordinate, peer_id, &err),
         },
-        Err(err) => failure(coordinate, &err),
+        Err(err) => failure(coordinate, peer_id, &err),
     }
 }
 
-fn failure(coordinate: SampleCoordinate, err: &DaError) -> SampleResult {
+fn failure(coordinate: SampleCoordinate, peer_id: String, err: &DaError) -> SampleResult {
     let outcome = match err {
         DaError::SampleUnavailable { .. } => SampleOutcome::Unavailable,
         DaError::InvalidProof => SampleOutcome::InvalidProof,
@@ -125,6 +188,7 @@ fn failure(coordinate: SampleCoordinate, err: &DaError) -> SampleResult {
     };
     SampleResult {
         coordinate,
+        peer_id,
         outcome,
         detail: Some(err.to_string()),
     }

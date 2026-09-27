@@ -1,4 +1,4 @@
-//! SQLite copy of sampling progress and the upstream peer score.
+//! SQLite copy of sampling progress and peer scores.
 //!
 //! The node still samples against the in-memory store. This module loads that
 //! store at startup and writes it back after each round, so a restarted process
@@ -19,8 +19,7 @@ pub(crate) struct StateDb {
 impl StateDb {
     pub(crate) fn open(
         path: &Path,
-        upstream_id: &str,
-        upstream_endpoint: &str,
+        configured: &[(String, String)],
     ) -> Result<(Self, MemoryStore, PeerManager), DaError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -64,8 +63,17 @@ impl StateDb {
         .map_err(|err| DaError::Message(format!("could not prepare sampling state: {err}")))?;
 
         let store = load_headers(&conn)?;
-        let score = load_score(&conn, upstream_id)?;
-        let peers = PeerManager::with_score(upstream_id, upstream_endpoint, score);
+        let scores = load_scores(&conn)?;
+        let peers = PeerManager::from_peers(
+            configured
+                .iter()
+                .map(|(id, endpoint)| crate::peer_manager::Peer {
+                    id: id.clone(),
+                    endpoint: endpoint.clone(),
+                    score: scores.get(id).copied().unwrap_or(0),
+                })
+                .collect(),
+        );
         Ok((
             Self {
                 conn: std::sync::Mutex::new(conn),
@@ -201,16 +209,19 @@ fn load_headers(conn: &Connection) -> Result<MemoryStore, DaError> {
     Ok(MemoryStore::import(stored))
 }
 
-fn load_score(conn: &Connection, upstream_id: &str) -> Result<i32, DaError> {
-    match conn.query_row(
-        "SELECT score FROM peers WHERE id = ?1",
-        params![upstream_id],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(score) => Ok(i32::try_from(score).unwrap_or(i32::MAX)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
-        Err(err) => Err(DaError::Message(format!(
-            "could not read sampling state: {err}"
-        ))),
-    }
+fn load_scores(conn: &Connection) -> Result<std::collections::HashMap<String, i32>, DaError> {
+    let mut statement = conn
+        .prepare("SELECT id, score FROM peers")
+        .map_err(|err| DaError::Message(format!("could not read sampling state: {err}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|err| DaError::Message(format!("could not read sampling state: {err}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| DaError::Message(format!("could not read sampling state: {err}")))?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, score)| (id, i32::try_from(score).unwrap_or(i32::MAX)))
+        .collect())
 }
