@@ -20,11 +20,19 @@ pub struct PeerManager {
 
 impl PeerManager {
     pub fn single(id: impl Into<String>, endpoint: impl Into<String>) -> Self {
+        Self::with_score(id, endpoint, 0)
+    }
+
+    pub(crate) fn with_score(
+        id: impl Into<String>,
+        endpoint: impl Into<String>,
+        score: i32,
+    ) -> Self {
         Self {
             peers: vec![Peer {
                 id: id.into(),
                 endpoint: endpoint.into(),
-                score: 0,
+                score,
             }],
         }
     }

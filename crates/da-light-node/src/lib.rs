@@ -8,6 +8,7 @@ pub mod config;
 pub mod node;
 pub mod peer_manager;
 
+mod persist;
 mod state;
 
 pub use config::NodeConfig;

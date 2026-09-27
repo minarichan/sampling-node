@@ -100,6 +100,48 @@ impl MemoryStore {
     }
 }
 
+pub(crate) struct StoredHeader {
+    pub header: Header,
+    pub successful: HashSet<SampleCoordinate>,
+    pub failed_samples: u32,
+    pub last_newly_sampled: u32,
+    pub last_failures: Vec<SampleFailure>,
+}
+
+impl MemoryStore {
+    pub(crate) fn export(&self) -> Vec<StoredHeader> {
+        self.by_id
+            .values()
+            .map(|state| StoredHeader {
+                header: state.header.clone(),
+                successful: state.successful.clone(),
+                failed_samples: state.failed_samples,
+                last_newly_sampled: state.last_newly_sampled,
+                last_failures: state.last_failures.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn import(rows: Vec<StoredHeader>) -> Self {
+        let by_id = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.header.id.clone(),
+                    HeaderState {
+                        header: row.header,
+                        successful: row.successful,
+                        failed_samples: row.failed_samples,
+                        last_newly_sampled: row.last_newly_sampled,
+                        last_failures: row.last_failures,
+                    },
+                )
+            })
+            .collect();
+        Self { by_id }
+    }
+}
+
 fn render(state: &HeaderState, engine: &ConfidenceEngine) -> ConfidenceReport {
     engine.report(
         &state.header,

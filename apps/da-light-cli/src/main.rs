@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,6 +78,9 @@ struct StartArgs {
     /// Bearer token for the Celestia node RPC, when the node requires auth
     #[arg(long)]
     celestia_token: Option<String>,
+    /// SQLite file that keeps sampling progress across restarts
+    #[arg(long, default_value = "sampling-node.db")]
+    data: PathBuf,
 }
 
 impl std::fmt::Display for NetworkKind {
@@ -130,6 +134,7 @@ async fn start(args: StartArgs) -> anyhow::Result<()> {
             NetworkKind::Mock => "local".into(),
             NetworkKind::Celestia => args.celestia_rpc.clone(),
         },
+        data_path: Some(args.data),
     };
 
     let network: Arc<dyn DANetwork> = match args.network {

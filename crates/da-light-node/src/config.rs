@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use da_light_core::DaError;
 
@@ -14,6 +15,8 @@ pub struct NodeConfig {
     pub unavailable_fraction: f64,
     pub upstream_id: String,
     pub upstream_endpoint: String,
+    /// SQLite file for sampling progress. Absent means the process keeps state in memory only.
+    pub data_path: Option<PathBuf>,
 }
 
 impl Default for NodeConfig {
@@ -26,6 +29,7 @@ impl Default for NodeConfig {
             unavailable_fraction: 0.25,
             upstream_id: "mock-local".into(),
             upstream_endpoint: "local".into(),
+            data_path: None,
         }
     }
 }

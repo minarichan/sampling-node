@@ -10,6 +10,7 @@ use da_light_core::{
 
 use crate::config::NodeConfig;
 use crate::peer_manager::{Peer, PeerManager};
+use crate::persist::StateDb;
 use crate::state::MemoryStore;
 
 /// Point-in-time view of the node for the status API.
@@ -28,6 +29,7 @@ pub struct Node {
     network: Arc<dyn DANetwork>,
     store: Mutex<MemoryStore>,
     peers: Mutex<PeerManager>,
+    db: Option<StateDb>,
     planner: SamplePlanner,
     confidence: ConfidenceEngine,
     config: NodeConfig,
@@ -36,11 +38,27 @@ pub struct Node {
 impl Node {
     pub fn new(network: Arc<dyn DANetwork>, config: NodeConfig) -> Result<Self, DaError> {
         config.validate()?;
-        let peers = PeerManager::single(&config.upstream_id, &config.upstream_endpoint);
+        let (db, store, peers) = if let Some(path) = &config.data_path {
+            let (db, store, peers) =
+                StateDb::open(path, &config.upstream_id, &config.upstream_endpoint)?;
+            tracing::info!(
+                path = %path.display(),
+                headers = store.len(),
+                "loaded sampling state"
+            );
+            (Some(db), store, peers)
+        } else {
+            (
+                None,
+                MemoryStore::default(),
+                PeerManager::single(&config.upstream_id, &config.upstream_endpoint),
+            )
+        };
         Ok(Self {
             network,
-            store: Mutex::new(MemoryStore::default()),
+            store: Mutex::new(store),
             peers: Mutex::new(peers),
+            db,
             planner: SamplePlanner::new(config.samples_per_header),
             confidence: ConfidenceEngine::new(config.unavailable_fraction),
             config,
@@ -69,6 +87,7 @@ impl Node {
             .lock()
             .await
             .record(&header, &results, &self.confidence);
+        self.save_state().await?;
         tracing::info!(
             header = %report.header_id,
             height = report.height,
@@ -118,6 +137,15 @@ impl Node {
             };
             peers.adjust_score(&self.config.upstream_id, delta);
         }
+    }
+
+    async fn save_state(&self) -> Result<(), DaError> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        let store = self.store.lock().await;
+        let peers = self.peers.lock().await;
+        db.save(&store, &peers)
     }
 }
 

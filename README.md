@@ -41,7 +41,9 @@ when that node requires a bearer token. Each share is checked with its
 namespace Merkle proof against the matching row or column root, and that root
 is checked against the header data root. A share the peer does not return is
 requested up to three times (`--sample-attempts`). A share that fails its proof
-is not retried. `start` needs a reachable node.
+is not retried. `start` needs a reachable node. Sampling progress and the peer
+score are written to `sampling-node.db`. Pass `--data` to use another file. A
+later `start` skips shares that already verified.
 
 ## HTTP API
 
@@ -74,7 +76,7 @@ sampling. The engine lives in `crates/da-light-core/src/sampling/confidence.rs`.
 
 ```text
 crates/da-light-core          trait, planner, workers, Merkle verifier, confidence
-crates/da-light-node          state, peer scores, axum API
+crates/da-light-node          sqlite state, peer scores, axum API
 crates/da-adapter-mock        in-memory DA layer with real proofs
 crates/da-adapter-celestia    Celestia headers and namespace-Merkle share proofs
 apps/da-light-cli             sampling-node binary
@@ -105,7 +107,6 @@ not pick it up. A new terminal already has `cargo` from rustup.
 
 ## Next
 
-Phase 2, still open: persist sampling state, and sample from more than one
-peer.
+Phase 2, still open: sample from more than one peer.
 Phase 3: row/column-aware sampling for 2D Reed-Solomon layouts, metrics, and a
 small dashboard.
